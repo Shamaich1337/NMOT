@@ -52,7 +52,7 @@ class NMOT:
             criteria=(cv.TERM_CRITERIA_EPS | cv.TERM_CRITERIA_COUNT, 20, 0.03),
         )
 
-        self.gaussian_ksize = (7, 7)
+        self.gaussian_ksize = (3, 3)
         self.morph_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (3, 3))
         self.morph_iterations = 1
 
@@ -81,11 +81,15 @@ class NMOT:
             self.last_detections = detections
             self.last_contours = contours
 
-            predictions = self._predict_tracks(frame_gray)
+            if self.use_lk:
+                predictions = self._predict_tracks(frame_gray)
+            else:
+                predictions  = {tid: track.pos for tid, track in self.tracks.items()}
+                
 
             matches, unmatched_tracks, unmatched_detections = self._associate(
                 predictions,
-                detections,
+                detections
             )
 
             self._update_matched_tracks(matches, detections, predictions)
@@ -167,8 +171,11 @@ class NMOT:
         # for tid in track_ids:
         #     tr = self.tracks[tid]
         #     predictions[tid] = tr.pos + tr.velocity
+        
+        # if not self.use_lk or self.prev_gray is None:
+        #     return predictions
 
-        if not self.use_lk or self.prev_gray is None:
+        if self.prev_gray is None:
             return predictions
 
         old_points = np.asarray(
