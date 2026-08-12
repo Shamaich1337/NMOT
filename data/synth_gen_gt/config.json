@@ -1,0 +1,9 @@
+{
+    "frame_num": 10000,
+    "frame_shape": "(720, 1280)",
+    "margin": 200,
+    "hurst_move": 1.0,
+    "hurst_species": 0.5,
+    "ants_num": 100,
+    "start_point": "None"
+}
