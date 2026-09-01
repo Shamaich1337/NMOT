@@ -2,7 +2,7 @@ import cv2 as cv
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Literal
 from scipy.optimize import linear_sum_assignment
 
 @dataclass
@@ -29,7 +29,8 @@ class NMOT:
         max_area: float = 1000.0,
         max_match_dist: float = 25.0,
         max_missed: int = 10,
-        use_lk: bool = True,
+        # use_lk: bool = True,
+        pred_head: Optional[Literal['kalman', 'lucas-kanade']] = None,
         roi: Optional[Tuple[int, int, int, int]] = None,
     ):
         self.knn_subtractor = cv.createBackgroundSubtractorKNN(
@@ -43,7 +44,8 @@ class NMOT:
         self.max_area = max_area
         self.max_match_dist = max_match_dist
         self.max_missed = max_missed
-        self.use_lk = use_lk
+        # self.use_lk = use_lk
+        self.pred_head = pred_head
         self.roi = roi
 
         self.lk_params = dict(
@@ -51,6 +53,15 @@ class NMOT:
             maxLevel=2,
             criteria=(cv.TERM_CRITERIA_EPS | cv.TERM_CRITERIA_COUNT, 20, 0.03),
         )
+
+        valid_pred_heads = (None, 'kalman', 'lucas-kanade')
+        if pred_head not in valid_pred_heads:
+            raise ValueError(
+                f"pred_head must be one of {valid_pred_heads}, got {pred_head}"
+            )
+        
+        if self.pred_head=='kalman':
+            self.kalman_filters: Dict[int, cv.KalmanFilter] = {}
 
         self.gaussian_ksize = (3, 3)
         self.morph_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (3, 3))
@@ -67,6 +78,24 @@ class NMOT:
         self.last_contours = []
         self.last_detections = np.empty((0, 2), dtype=np.float32)
 
+    def _init_kalman(self, pos):
+        # init constant velocity kalman filter
+        kf = cv.KalmanFilter(dynamParams = 4, measureParams = 2)
+        # [x, y, dx, dy]; [x, y]
+
+        kf.measurementMatrix = np.array([[1,0,0,0],
+                                         [0,1,0,0]], np.float32)
+
+        kf.transitionMatrix = np.array([[1,0,1,0],
+                                        [0,1,0,1], 
+                                        [0,0,1,0], 
+                                        [0,0,0,1]], np.float32)
+
+        kf.processNoiseCov = np.eye(4, dtype=np.float32) * 1e-2 
+        kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-1
+        kf.statePost = np.array([[pos[0]], [pos[1]], [0], [0]], np.float32)
+        return kf
+    
     def update(self, frame: np.ndarray):
         frame_gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
         mask = self._foreground_mask(frame_gray)
@@ -76,17 +105,20 @@ class NMOT:
         self.last_detections = np.empty((0, 2), dtype=np.float32)
 
         if self.frame_idx >= self.warmup_frames:
+            # knn + morphology + centroid extraction
             detections, contours = self._detect_centroids(mask)
 
             self.last_detections = detections
             self.last_contours = contours
 
-            if self.use_lk:
-                predictions = self._predict_tracks(frame_gray)
-            else:
+            if self.pred_head=='lucas-kanade':
+                predictions = self._predict_tracks_lucas_kanade(frame_gray)
+            elif self.pred_head=='kalman':
+                predictions = self._predict_tracks_kalman()
+            elif self.pred_head is None:
                 predictions  = {tid: track.pos for tid, track in self.tracks.items()}
-                
-
+            else:
+                raise ValueError(f"Unknown pred_head: {self.pred_head}")
             matches, unmatched_tracks, unmatched_detections = self._associate(
                 predictions,
                 detections
@@ -160,7 +192,7 @@ class NMOT:
 
         return np.asarray(detections, dtype=np.float32), valid_contours
 
-    def _predict_tracks(self, gray: np.ndarray) -> Dict[int, np.ndarray]:
+    def _predict_tracks_lucas_kanade(self, gray: np.ndarray) -> Dict[int, np.ndarray]:
         predictions = {}
 
         if len(self.tracks) == 0:
@@ -168,20 +200,12 @@ class NMOT:
 
         track_ids = list(self.tracks.keys())
 
-        # for tid in track_ids:
-        #     tr = self.tracks[tid]
-        #     predictions[tid] = tr.pos + tr.velocity
-        
-        # if not self.use_lk or self.prev_gray is None:
-        #     return predictions
-
         if self.prev_gray is None:
             return predictions
 
         old_points = np.asarray(
             [self.tracks[tid].pos for tid in track_ids],
-            dtype=np.float32,
-        ).reshape(-1, 1, 2)
+            dtype=np.float32,).reshape(-1, 1, 2)
 
         new_points, status, err = cv.calcOpticalFlowPyrLK(
             self.prev_gray,
@@ -200,6 +224,27 @@ class NMOT:
         for tid, point, ok in zip(track_ids, new_points, status):
             if int(ok) == 1:
                 predictions[tid] = point.astype(np.float32)
+
+        return predictions
+
+
+    def _predict_tracks_kalman(self):
+        predictions = {}
+
+        if len(self.tracks) == 0:
+            return predictions
+
+        for tid, tr in self.tracks.items():
+            # init new filter for new track
+            if tid not in self.kalman_filters:
+                self.kalman_filters[tid]=self._init_kalman(tr.pos)
+            
+            kf = self.kalman_filters[tid]
+            
+            pred = kf.predict()
+            point = pred[:2].flatten()
+            predictions[tid] = point
+        
 
         return predictions
 
@@ -250,7 +295,11 @@ class NMOT:
             tr = self.tracks[tid]
 
             new_pos = detections[det_idx].astype(np.float32)
-            
+
+            if self.pred_head=='kalman' and tid in self.kalman_filters:
+                kf = self.kalman_filters[tid]
+                kf.correct(new_pos.reshape(-1, 1))
+
             tr.prev_pos = tr.pos.copy()
             tr.pos = new_pos
             tr.velocity = tr.pos - tr.prev_pos
@@ -295,6 +344,8 @@ class NMOT:
         ]
 
         for tid in dead_tracks:
+            if self.pred_head=='kalman':
+                self.kalman_filters.pop(tid, None)
             del self.tracks[tid]
 
     def _record(self, tr: Track, status: str):
