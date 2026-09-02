@@ -5,30 +5,23 @@ import matplotlib.pyplot as plt
 from typing import Optional, Union, Tuple
 from IPython.display import clear_output
 from collections import defaultdict
+import seaborn as sns
 
+def draw_traj(trajectories, frame_shape: tuple, ants_num: int):
+    
+    colors = sns.color_palette(palette='bright', n_colors=ants_num)
+    colors = [tuple([int(c*255) for c in color]) for color in colors]
 
-def draw_traj(trajectories,
-              frame_shape: tuple,
-              thickness: int):
-    
-    ants_num = trajectories.shape[1]
-    bgs = [np.zeros(shape=frame_shape, dtype=np.uint8) for _ in range(ants_num)]
-    
-    for ant_idx in range(ants_num):
-        
-        traj_raw = trajectories[:, ant_idx, :]
-        
-        valid_mask = ~np.any(np.isnan(traj_raw), axis=1)
-        traj_clean = traj_raw[valid_mask]
-        
-        if len(traj_clean) < 2:
-            continue
-         
-        traj_int = np.ascontiguousarray(traj_clean.astype(np.int32))
-        
-        cv.polylines(bgs[ant_idx], [traj_int], isClosed=False, color=255, thickness=thickness)
-    
-    return bgs
+    bg = np.zeros(shape=(*frame_shape, 3), dtype=np.uint8)
+    trajs = []
+    for ant in range(trajectories.shape[1]):
+        trajs.append(np.array([np.array(traj) for traj in trajectories[:, ant]]))
+    for ant, color in  zip(trajs, colors):
+
+        cv.polylines(bg, [ant], isClosed=False, color=color, thickness=2)
+
+    plt.imshow(cv.cvtColor(bg, cv.COLOR_BGR2RGB))
+    plt.show()
 
 
 def gen_traj(frame_num: int,
@@ -47,8 +40,8 @@ def gen_traj(frame_num: int,
     y = dy.round().cumsum(axis=0).astype(np.int32)
 
     if start_point is None:
-        start_x = np.random.randint(margin, frame_shape[1] - margin, (ants_num,))
-        start_y = np.random.randint(margin, frame_shape[0] - margin, (ants_num,))
+        start_x = np.random.randint(-margin, frame_shape[1] + margin, (ants_num,))
+        start_y = np.random.randint(-margin, frame_shape[0] + margin, (ants_num,))
         start_point = np.stack([start_x, start_y], axis=1)
 
     trajectories = np.stack([x, y], axis=2)
