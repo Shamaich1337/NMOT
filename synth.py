@@ -7,10 +7,10 @@ from IPython.display import clear_output
 from collections import defaultdict
 import seaborn as sns
 
-def draw_traj(trajectories, frame_shape: tuple, ants_num: int):
+def draw_traj(trajectories, frame_shape: tuple, ants_num: int, palette:str='bright'):
     
-    colors = sns.color_palette(palette='bright', n_colors=ants_num)
-    colors = [tuple([int(c*255) for c in color]) for color in colors]
+    colors = sns.color_palette(palette=palette, n_colors=ants_num)
+    colors = [tuple([int(c*255) for c in color][::-1]) for color in colors]
 
     bg = np.zeros(shape=(*frame_shape, 3), dtype=np.uint8)
     trajs = []
