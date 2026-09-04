@@ -30,8 +30,9 @@ class NMOT:
         max_match_dist: float = 25.0,
         max_missed: int = 10,
         # use_lk: bool = True,
-        pred_head: Optional[Literal['kalman', 'lucas-kanade']] = None,
+        pred_head: Optional[Literal['kalman', 'kalman_ar1', 'lucas-kanade']] = None,
         roi: Optional[Tuple[int, int, int, int]] = None,
+        kasdin_hurst:float=1.2
     ):
         self.knn_subtractor = cv.createBackgroundSubtractorKNN(
             history=knn_history,
@@ -54,14 +55,15 @@ class NMOT:
             criteria=(cv.TERM_CRITERIA_EPS | cv.TERM_CRITERIA_COUNT, 20, 0.03),
         )
 
-        valid_pred_heads = (None, 'kalman', 'lucas-kanade')
+        valid_pred_heads = (None, 'kalman', 'kalman_ar1', 'lucas-kanade')
         if pred_head not in valid_pred_heads:
             raise ValueError(
                 f"pred_head must be one of {valid_pred_heads}, got {pred_head}"
             )
         
-        if self.pred_head=='kalman':
+        if self.pred_head in ['kalman', 'kalman_ar1']:
             self.kalman_filters: Dict[int, cv.KalmanFilter] = {}
+            self.kasdin_hurst = kasdin_hurst
 
         self.gaussian_ksize = (3, 3)
         self.morph_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (3, 3))
@@ -78,7 +80,7 @@ class NMOT:
         self.last_contours = []
         self.last_detections = np.empty((0, 2), dtype=np.float32)
 
-    def _init_kalman(self, pos):
+    def _init_kalman_const_velocity(self, pos):
         # init constant velocity kalman filter
         kf = cv.KalmanFilter(dynamParams = 4, measureParams = 2)
         # [x, y, dx, dy]; [x, y]
@@ -96,6 +98,57 @@ class NMOT:
         kf.statePost = np.array([[pos[0]], [pos[1]], [0], [0]], np.float32)
         return kf
     
+    def _init_kalman_ar1(self, pos):
+        
+        def compute_ar_coefficients(H, order=2):
+            
+            beta = 2 * H - 1
+            
+            a = [1.0]  # a_0 = 1
+            for k in range(1, order + 1):
+                a_k = (k - 1 - beta / 2) * a[-1] / k
+                a.append(a_k)
+            
+            return a[1:]
+
+        
+        a = compute_ar_coefficients(self.kasdin_hurst, 2)
+         
+        # [x, y, dx, dy]; [x, y]
+        kf = cv.KalmanFilter(dynamParams=4, measureParams=2)
+        
+        a1, a2 = a
+        
+        F = np.array([
+            [1, 0, 1, 0],      # x_k = x_{k-1} + dx_{k-1}
+            [0, 1, 0, 1],      # y_k = y_{k-1} + dy_{k-1}
+            [0, 0, -a1, 0],    # dx_k = -a1 * dx_{k-1}
+            [0, 0, 0, -a1]     # dy_k = -a1 * dy_{k-1}
+        ], dtype=np.float32)
+        
+        kf.transitionMatrix = F
+        
+        kf.measurementMatrix = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0]
+        ], dtype=np.float32)
+        
+        state = np.array([
+            [pos[0]], [pos[1]], 
+            [0], [0]
+        ], dtype=np.float32)
+       
+        kf.processNoiseCov = np.eye(4, dtype=np.float32) * 1e-2
+        
+        kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-1
+        
+        kf.statePost = state
+        kf.statePre = state.copy()
+        
+        return kf
+    
+
+
     def update(self, frame: np.ndarray):
         frame_gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
         mask = self._foreground_mask(frame_gray)
@@ -110,10 +163,11 @@ class NMOT:
 
             self.last_detections = detections
             self.last_contours = contours
-
+            
+            # optional predhead calling
             if self.pred_head=='lucas-kanade':
                 predictions = self._predict_tracks_lucas_kanade(frame_gray)
-            elif self.pred_head=='kalman':
+            elif self.pred_head in ['kalman', 'kalman_ar1']:
                 predictions = self._predict_tracks_kalman()
             elif self.pred_head is None:
                 predictions  = {tid: track.pos for tid, track in self.tracks.items()}
@@ -237,7 +291,12 @@ class NMOT:
         for tid, tr in self.tracks.items():
             # init new filter for new track
             if tid not in self.kalman_filters:
-                self.kalman_filters[tid]=self._init_kalman(tr.pos)
+                if self.pred_head=='kalman':
+                    self.kalman_filters[tid]=self._init_kalman_const_velocity(tr.pos)
+                elif self.pred_head=='kalman_ar1':
+                    self.kalman_filters[tid]=self._init_kalman_ar1(tr.pos)
+                # elif self.pred_head=='kalman_ar2':
+                #     self.kalman_filters[tid]=self._init_kalman_ar2(tr.pos)
             
             kf = self.kalman_filters[tid]
             
@@ -296,7 +355,7 @@ class NMOT:
 
             new_pos = detections[det_idx].astype(np.float32)
 
-            if self.pred_head=='kalman' and tid in self.kalman_filters:
+            if self.pred_head in ['kalman', 'kalman_ar1'] and tid in self.kalman_filters:
                 kf = self.kalman_filters[tid]
                 kf.correct(new_pos.reshape(-1, 1))
 
@@ -344,7 +403,7 @@ class NMOT:
         ]
 
         for tid in dead_tracks:
-            if self.pred_head=='kalman':
+            if self.pred_head in ['kalman', 'kalman_ar1']:
                 self.kalman_filters.pop(tid, None)
             del self.tracks[tid]
 
