@@ -85,13 +85,15 @@ class NMOT:
         kf = cv.KalmanFilter(dynamParams = 4, measureParams = 2)
         # [x, y, dx, dy]; [x, y]
 
-        kf.measurementMatrix = np.array([[1,0,0,0],
-                                         [0,1,0,0]], np.float32)
+        kf.measurementMatrix = np.array([[1,0,0,0], # x
+                                         [0,1,0,0]], # y
+                                         np.float32)
 
-        kf.transitionMatrix = np.array([[1,0,1,0],
-                                        [0,1,0,1], 
-                                        [0,0,1,0], 
-                                        [0,0,0,1]], np.float32)
+        kf.transitionMatrix = np.array([[1,0,1,0], # x_k = x_{k-1} + dx_{k-1}
+                                        [0,1,0,1], # y_k = y_{k-1} + dy_{k-1}
+                                        [0,0,1,0], # dx_k = dx_{k-1}
+                                        [0,0,0,1]], # dy_k = dy_{k-1}
+                                        np.float32)
 
         kf.processNoiseCov = np.eye(4, dtype=np.float32) * 1e-2 
         kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-1
@@ -113,7 +115,7 @@ class NMOT:
 
         
         a = compute_ar_coefficients(self.kasdin_hurst, 2)
-         
+            
         # [x, y, dx, dy]; [x, y]
         kf = cv.KalmanFilter(dynamParams=4, measureParams=2)
         
@@ -137,7 +139,7 @@ class NMOT:
             [pos[0]], [pos[1]], 
             [0], [0]
         ], dtype=np.float32)
-       
+        
         kf.processNoiseCov = np.eye(4, dtype=np.float32) * 1e-2
         
         kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-1
@@ -146,7 +148,70 @@ class NMOT:
         kf.statePre = state.copy()
         
         return kf
-    
+
+    def _init_kalman_ar2(self, pos):
+            
+        def compute_ar_coefficients(H, order=2):
+            
+            beta = 2 * H - 1
+            
+            a = [1.0]  # a_0 = 1
+            for k in range(1, order + 1):
+                a_k = (k - 1 - beta / 2) * a[-1] / k
+                a.append(a_k)
+            
+            return a[1:]
+
+        
+        a = compute_ar_coefficients(self.kasdin_hurst, 2)
+            
+        # [x, y, dx, dy, ddx, ddy]; [x, y]
+        kf = cv.KalmanFilter(dynamParams=6, measureParams=2)
+        
+        a1, a2 = a
+        
+        F = np.array([
+            [1, 0, -a1-a2, 0, a2, 0],   # x_k = x_{k-1} + (-a1-a2)*dx_{k-1} + a2*ddx_{k-1}
+            [0, 1, 0, -a1-a2, 0, a2],   # y_k = y_{k-1} + (-a1-a2)*dy_{k-1} + a2*ddy_{k-1}
+            [0, 0, -a1-a2, 0, a2, 0],   # dx_k = (-a1-a2)*dx_{k-1} + a2*ddx_{k-1}
+            [0, 0, 0, -a1-a2, 0, a2],   # dy_k = (-a1-a2)*dy_{k-1} + a2*ddy_{k-1}
+            [0, 0, -a1-a2-1, 0, a2, 0], # ddx_k = (-a1-a2-1)*dx_{k-1} + a2*ddx_{k-1}
+            [0, 0, 0, -a1-a2-1, 0, a2], # ddy_k = (-a1-a2-1)*dy_{k-1} + a2*ddy_{k-1}
+        ], dtype=np.float32)
+        
+        kf.transitionMatrix = F
+        
+        kf.measurementMatrix = np.array([
+            [1, 0, 0, 0, 0, 0],
+            [0, 1, 0, 0, 0, 0]
+        ], dtype=np.float32)
+        
+        state = np.array([
+            [pos[0]], [pos[1]],
+            [0], [0],
+            [0], [0]
+        ], dtype=np.float32)
+
+
+        q = 0.8 ** 2
+
+        Q = q * np.array([
+            [1, 0, 1, 0, 1, 0],
+            [0, 1, 0, 1, 0, 1],
+            [1, 0, 1, 0, 1, 0],
+            [0, 1, 0, 1, 0, 1],
+            [1, 0, 1, 0, 1, 0],
+            [0, 1, 0, 1, 0, 1],
+        ], dtype=np.float32)
+
+        kf.processNoiseCov = Q
+        
+        kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-1
+        
+        kf.statePost = state
+        kf.statePre = state.copy()
+        
+        return kf
 
 
     def update(self, frame: np.ndarray):
