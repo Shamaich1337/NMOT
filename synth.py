@@ -562,38 +562,40 @@ def build_visible_gt(
 
     return df
 
-def calc_iou(tracks, thickness, frame_shape):
+def calc_soi(frame_shape, high_frame_threshold, low_frame_threshold, df, thickness):
 
-    union = np.zeros(frame_shape, dtype=np.uint16)
-    canvas = np.zeros(frame_shape, dtype=np.uint8)
+    canvas_threshold = np.zeros(frame_shape, dtype=np.uint16)
+    tracks2draw = df.loc[(df['frame']<high_frame_threshold)&
+                              (df['frame']>=low_frame_threshold),
+                              'track_id'].unique()
+    l2_len = 0
+    for tr in tracks2draw:
+        # get track points
+        pts = df.loc[(df['frame']<high_frame_threshold)&
+                          (df['frame']>=low_frame_threshold)&
+                          (df['track_id']==tr),
+                          ['x', 'y']].to_numpy(dtype=np.int32)
+        # calc track l2 length
+        increments = np.diff(pts, axis=0)
+        l2_len += np.linalg.norm(increments, axis=1).sum()
 
-    ants_num = tracks.shape[1]
-
-    for ant_idx in range(ants_num):
-
-        traj = tracks[:, ant_idx]
-
-        valid = ~np.any(np.isnan(traj), axis=1)
-        traj = traj[valid]
-
-        if len(traj) < 2:
-            continue
-
-        canvas.fill(0)
-
+        # draw track
+        buffer = np.zeros(frame_shape, dtype=np.uint8)
         cv.polylines(
-            canvas,
-            [np.ascontiguousarray(traj, dtype=np.int32)],
+            buffer,
+            [pts],
             isClosed=False,
             color=1,
-            thickness=thickness,
+            thickness=thickness
         )
+        
+        canvas_threshold += buffer
+        
+    union_mask = canvas_threshold > 0 # маска покрытия треками
+    intersection_mask = canvas_threshold > 1 # маска покрытия хотябы 2-мя треками
+    soi_area = intersection_mask.sum() / union_mask.sum()
 
-        union += canvas
+    intersection_count = canvas_threshold - union_mask
+    soi_counts = intersection_count.sum() / canvas_threshold.sum()
 
-    
-    union_mask = union > 0
-    intersection = union - union_mask
-    iou = intersection.sum() / union.sum()
-
-    return iou, intersection, union
+    return canvas_threshold, l2_len, soi_area, soi_counts
